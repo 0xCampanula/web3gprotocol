@@ -1,6 +1,6 @@
 {
-  "name": "web3protocol",
-  "version": "0.5.3",
+  "name": "web3gprotocol",
+  "version": "1.0.0",
   "description": "Parse and execute ERC-6860 web3:// URLs",
   "type": "module",
   "exports": {
@@ -10,14 +10,7 @@
   "author": "nand2",
   "license": "MIT",
   "engines": {
-    "node": ">=16"
-  },
-  "devDependencies": {
-    "jest": "^29.5.0",
-    "toml": "3.0.0"
-  },
-  "scripts": {
-    "test": "node --experimental-vm-modules ./node_modules/.bin/jest"
+    "node": ">=18"
   },
   "dependencies": {
     "cross-fetch": "^4.0.0",

@@ -48,6 +48,11 @@ function processResourceRequestContractReturn(client, fetchedUrl, contractReturn
   const decodedContractReturn = decodeAbiParameters(returnABI, contractReturn)
 
   fetchedUrl.httpCode = decodedContractReturn[0]
+  // Contracts can return arbitrary uint16; an out-of-range status crashes
+  // downstream Response constructors, so validate it here with a clear error.
+  if(fetchedUrl.httpCode < 200 || fetchedUrl.httpCode > 599) {
+    throw new Error("Invalid HTTP status code returned by contract: " + fetchedUrl.httpCode)
+  }
   for(let i = 0; i < decodedContractReturn[2].length; i++) {
     fetchedUrl.httpHeaders[decodedContractReturn[2][i][0]] = decodedContractReturn[2][i][1];
   }
@@ -58,42 +63,56 @@ function processResourceRequestContractReturn(client, fetchedUrl, contractReturn
   fetchedUrl.output = new ReadableStream({
     type: "bytes",
     async start(controller) {
-      if(outputBytes.length > 0)
-        controller.enqueue(outputBytes);
-
-      // Experimental support for chunking -- needs to be finalized and put on an ERC
-      // Recursive fetching of next chunks
-      async function getNextChunk(nextChunkUrl) {
-        // End? We close the stream
-        if(nextChunkUrl === undefined || nextChunkUrl == "") {
-          controller.close();
-          return;
-        }
-
-        // URL: If relative, make it absolute
-        if(nextChunkUrl.substring(0, 1) == "/") {
-          nextChunkUrl = "web3://" + fetchedUrl.parsedUrl.contractAddress + ":" + fetchedUrl.parsedUrl.chainId + nextChunkUrl
-        }
-
-        // Fetch the next chunk
-        let parsedNextChunkUrl = await client.parseUrl(nextChunkUrl)
-        let nextChunkContractReturn = await client.fetchContractReturn(parsedNextChunkUrl)
-        let nextChunkDecodedContractReturn = decodeAbiParameters(returnABI, nextChunkContractReturn.data)
-
-        // Send the chunk to the stream
-        let outputBytes = hexToBytes(nextChunkDecodedContractReturn[1])
+      try {
         if(outputBytes.length > 0)
-          controller.enqueue(outputBytes);        
+          controller.enqueue(outputBytes);
 
-        // Loop headers, find next chunk
-        let nextChunkHeader = nextChunkDecodedContractReturn[2].find(header => header[0] == "web3-next-chunk");
-        nextChunkUrl = nextChunkHeader ? nextChunkHeader[1] : "";
+        // Experimental support for chunking -- needs to be finalized and put on an ERC
+        // Follow the web3-next-chunk header chain with guards against malicious or
+        // buggy contracts: cap the number of chunks and detect URL loops.
+        const MAX_CHUNKS = 256;
+        const visitedChunkUrls = new Set();
+        // HTTP header names are case-insensitive; the contract may emit any casing
+        const firstChunkHeaderEntry = Object.entries(fetchedUrl.httpHeaders)
+          .find(([headerName]) => headerName.toLowerCase() == "web3-next-chunk");
+        let nextChunkUrl = firstChunkHeaderEntry ? firstChunkHeaderEntry[1] : undefined;
+        let chunkCount = 0;
 
-        await getNextChunk(nextChunkUrl);
+        while(nextChunkUrl !== undefined && nextChunkUrl != "") {
+          // URL: If relative, make it absolute
+          if(nextChunkUrl.substring(0, 1) == "/") {
+            nextChunkUrl = "web3://" + fetchedUrl.parsedUrl.contractAddress + ":" + fetchedUrl.parsedUrl.chainId + nextChunkUrl
+          }
+
+          if(visitedChunkUrls.has(nextChunkUrl)) {
+            throw new Error("web3-next-chunk loop detected at URL: " + nextChunkUrl)
+          }
+          if(chunkCount >= MAX_CHUNKS) {
+            throw new Error("Too many chunks: web3-next-chunk chain exceeds the limit of " + MAX_CHUNKS)
+          }
+          visitedChunkUrls.add(nextChunkUrl);
+          chunkCount++;
+
+          // Fetch the next chunk
+          let parsedNextChunkUrl = await client.parseUrl(nextChunkUrl)
+          let nextChunkContractReturn = await client.fetchContractReturn(parsedNextChunkUrl)
+          let nextChunkDecodedContractReturn = decodeAbiParameters(returnABI, nextChunkContractReturn.data)
+
+          // Send the chunk to the stream
+          let outputBytes = hexToBytes(nextChunkDecodedContractReturn[1])
+          if(outputBytes.length > 0)
+            controller.enqueue(outputBytes);        
+
+          // Loop headers, find next chunk (header names are case-insensitive)
+          let nextChunkHeader = nextChunkDecodedContractReturn[2].find(header => header[0].toLowerCase() == "web3-next-chunk");
+          nextChunkUrl = nextChunkHeader ? nextChunkHeader[1] : "";
+        }
+
+        controller.close();
       }
-
-      // Get next chunk, if any
-      await getNextChunk(fetchedUrl.httpHeaders["web3-next-chunk"]);
+      catch(err) {
+        controller.error(err);
+      }
     }
   });
 }

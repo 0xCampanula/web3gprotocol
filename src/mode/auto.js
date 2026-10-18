@@ -107,7 +107,7 @@ async function parseAutoUrl(result, path, chainClient) {
     }
     let returnsParamTypes = recReturnDecodeFn(recReturnDecodeFn, returnsParam.substr(1, returnsParam.length - 2));
 
-    if(returnsParamTypes == 0) {
+    if(returnsParamTypes.length == 0) {
       // ?returns=() => We returns the raw bytes json-encoded
       result.contractReturnProcessing = 'jsonEncodeRawBytes';
     }
@@ -134,7 +134,9 @@ async function parseAutoUrl(result, path, chainClient) {
 
     // Standard MIME
     if(mimeFieldName == "mime.content") {
-      if(/^[^\/]+\/[^\/]+(,[^=]+=[^=]+)?$/.test(mimeFieldValue) == false) {
+      // Validate "type/subtype" with an optional single ",param=value" parameter;
+      // tokens only allow word chars plus . + - so garbage cannot slip through.
+      if(/^[\w.+-]+\/[\w.+-]+(,[\w.+-]+=[\w.+-]+)?$/.test(mimeFieldValue) == false) {
         throw new Error("Invalid MIME type: " + mimeFieldValue)
       }
       result.contractReturnProcessingOptions.mimeType = mimeFieldValue
@@ -257,9 +259,9 @@ async function parseAutoUrlArgument(argument, chainClient) {
       throw new Error("Unknown type: " + result.type);
     }
   }
-  // No type specified : we autodetect
+  // No type specified : we autodetect (same percent-decoding as the typed branch)
   else {
-    let argValueStr = argument
+    let argValueStr = decodedArgument
 
     // Autodetect uint256
     if(/^[0-9]+$/.test(argValueStr)) {

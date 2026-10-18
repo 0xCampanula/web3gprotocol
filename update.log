@@ -1,0 +1,29 @@
+# 版本更新日志
+
+## 1.0.0（2026-10-18）
+
+首个正式主版本。chainlist 大规模清理，含破坏性变更。
+
+### 破坏性变更
+- chainlist 注册表由 990 条精简至 499 条，共删除 491 条网络：已官方确认关停的链（如 Goerli 体系、HECO、Evmos、Moonbeam/Moonriver、Mumbai、Arbitrum Goerli 等）、官方标记 deprecated 的链、无任何可用 RPC 的链、废弃测试网及开发网。被删链的 web3:// 地址将无法解析，如有需要请自行添加自定义链。
+
+### 变更
+- chainId 196：OKBChain Mainnet 更名为 X Layer，RPC/浏览器/原生货币等全字段与上游 chainid.network 同步
+- chainId 998：Lucky Network 更名为 Hyperliquid EVM Testnet，全字段与上游同步（含 reusedChainId 标记）
+- 新增 chainId 100011 QuarkChain L2 Mainnet
+- 内置 gethfs-cli 维护的 9 条精选 RPC（以太坊/Sepolia/Optimism/Arbitrum/BSC 主网+测试网/Avalanche 主网+测试网/QuarkChain L2），在各链 RPC 列表中置顶为首选
+- 新增 flatdirectory.js 模块：FlatDirectory 合约读取先做分块探测（依次尝试 getChunkCountsBatch、countChunks，失败回退单次 eth_call），探测成功后严格串行逐块流式读取；manual 模式已集成并含兜底逻辑
+
+### 修复
+- ENS resolver 返回零地址时提前拦截，避免无效调用
+- auto 模式无类型参数补充 percent-decoding
+- ensRegistry 合约存在性增加防御检查
+- 修复 linagee 错误信息括号笔误
+
+### 优化与清理
+- viem 链清单改为 Map 索引，避免逐链全表扫描
+- parallel 模式简化 Promise.any 用法
+- 两个内部缓存增加上限淘汰
+- #opts 由数组改为对象
+- 提取共享 URL 正则
+- 清理死代码：未使用导入、无调用函数、只写字段、死常量、调试残留、chainRpc 死字段

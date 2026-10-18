@@ -1,14 +1,12 @@
-# web3protocol
-
-[![npm version](https://badge.fury.io/js/web3protocol.svg)](https://www.npmjs.com/package/web3protocol)
+# web3gprotocol
 
 Parse and execute [ERC-6860 / ERC-4804 ``web3://`` protocol](https://eips.ethereum.org/EIPS/eip-6860) URLs. Used by [EVM Browser](https://github.com/nand2/evm-browser) to browse ``web3://`` on-chain websites.
 
 ## Usage
 
 ```js
-import { Client } from 'web3protocol';
-import { getDefaultChainList } from 'web3protocol/chains';
+import { Client } from 'web3gprotocol';
+import { getDefaultChainList } from 'web3gprotocol/chains';
 
 // Get a prepared chain list that you can optionally alter, or provide your own
 let chainList = getDefaultChainList()

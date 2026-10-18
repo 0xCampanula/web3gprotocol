@@ -5,12 +5,17 @@ import { linageeResolveDomainName, linageeResolveDomainNameInclErc6821 } from '.
 const getEligibleDomainNameResolver = (domainName, chainId) => {
   let result = null;
 
-  if(typeof domainName == 'string' && 
-    domainName.endsWith('.eth') && [1, 5, 11155111].includes(chainId)) {
+  if(typeof domainName != 'string') {
+    return result;
+  }
+  // Domain names are case-insensitive; normalize before suffix matching so
+  // e.g. "NAME.ETH" is resolvable (ensNormalize handles the rest afterwards).
+  const normalizedDomainName = domainName.toLowerCase();
+
+  if(normalizedDomainName.endsWith('.eth') && [1, 11155111].includes(chainId)) {
     result = "ens";
   }
-  else if(typeof domainName == 'string' && 
-    domainName.endsWith('.og') && [1].includes(chainId)) {
+  else if(normalizedDomainName.endsWith('.og') && [1].includes(chainId)) {
     result = "linagee";
   }
 
@@ -24,10 +29,10 @@ const resolveDomainName = async (domainNameResolver, domainName, chainClient) =>
 
   // ENS
   if(domainNameResolver == "ens") {
-    result = ensResolveDomainName(domainName, chainClient, result)
+    result = ensResolveDomainName(domainName, chainClient)
   }
   else if(domainNameResolver == "linagee") {
-    result = linageeResolveDomainName(domainName, chainClient, result)
+    result = linageeResolveDomainName(domainName, chainClient)
   }
   else {
     throw new Error("Unknown resolver");

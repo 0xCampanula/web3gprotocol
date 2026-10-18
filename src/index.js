@@ -1,16 +1,33 @@
-import { decodeAbiParameters, hexToBytes, stringToBytes, encodeFunctionData } from 'viem';
+import { decodeAbiParameters, hexToBytes, hexToString, stringToBytes, encodeFunctionData } from 'viem';
 
 import { parseManualUrl }  from './mode/manual.js';
 import { parseAutoUrl } from './mode/auto.js';
 import { parseResourceRequestUrl, processResourceRequestContractReturn } from './mode/5219.js';
 import { getEligibleDomainNameResolver, resolveDomainNameInclErc6821 } from './name-service/index.js';
 import { ChainClientProvider } from './chains/client.js'
+import { fetchFlatDirectoryFile } from './flatdirectory.js'
 
+
+// Shared by parseUrl() and the FlatDirectory probe; use a regex rather than
+// `new URL()`: chain ids exceed the 65535 port limit
+const urlMainPartsRegex = /^(?<protocol>[^:]+):\/\/(?<hostname>[^:\/?]+)(:(?<chainId>[1-9][0-9]*))?(?<path>.*)?$/
+
+// Make a one-shot byte ReadableStream from a Uint8Array
+const bytesToReadableStream = (outputBytes) => new ReadableStream({
+  type: "bytes",
+  start(controller) {
+    if(outputBytes.length > 0)
+      controller.enqueue(outputBytes);
+    controller.close();
+  }
+})
 
 class Client {
   #chainList = []
   #chainClientProvider = null
-  #opts = []
+  #opts = {}
+  // resolveMode() determination results per "chainId:contractAddress"
+  #resolveModeCache = new Map()
 
   constructor(chainList, opts) {
     this.#chainList = chainList
@@ -18,7 +35,11 @@ class Client {
       // Enum, possibilities are
       // - fallback: One is tried after the other
       // - parallel : All RPCs are called in parralel, the first to answer is used
-      multipleRpcMode: 'fallback'
+      multipleRpcMode: 'fallback',
+      // Optional callback (err, url) invoked when a FlatDirectory probe fails
+      // with an unexpected error, so genuine RPC failures are not silently
+      // masked as "not a flat directory"
+      onFlatDirectoryProbeError: null,
     }, ...opts}
 
     // Manual enum check...
@@ -36,11 +57,90 @@ class Client {
    */
   async fetchUrl(url) {
 
-    let parsedUrl = await this.parseUrl(url)
+    let parsedUrl;
+    try {
+      parsedUrl = await this.parseUrl(url)
+    }
+    catch(err) {
+      // Standard parsing fails for paths that are not valid auto-mode method
+      // names (e.g. "/firefly.mp4"); probe for a FlatDirectory-style chunked
+      // storage contract before giving up.
+      const flatDirectoryResult = await this.#fetchFlatDirectoryUrl(url)
+        .catch((err) => this.#handleFlatDirectoryProbeError(err, url))
+      if(flatDirectoryResult) {
+        return flatDirectoryResult;
+      }
+      throw err;
+    }
+
+    // In manual mode the whole file would be assembled and returned in a
+    // single merged call, which is physically impossible for large files;
+    // prefer a chunked read when the contract is a FlatDirectory-style storage.
+    if(parsedUrl.mode == "manual") {
+      const flatDirectoryResult = await this.#fetchFlatDirectoryUrl(url, parsedUrl)
+        .catch((err) => this.#handleFlatDirectoryProbeError(err, url))
+      if(flatDirectoryResult) {
+        return flatDirectoryResult;
+      }
+    }
+
     let contractReturn = await this.fetchContractReturn(parsedUrl)
     let result = await this.processContractReturn(parsedUrl, contractReturn)
 
     return result;
+  }
+
+  // A FlatDirectory probe failure normally just means "the contract is not
+  // chunked storage" and is silent by design; surface unexpected errors via
+  // the optional callback before falling back to the regular flow.
+  #handleFlatDirectoryProbeError(err, url) {
+    if(typeof this.#opts.onFlatDirectoryProbeError == 'function') {
+      this.#opts.onFlatDirectoryProbeError(err, url)
+    }
+    return null
+  }
+
+  /**
+   * Probe the contract pointed to by `url` for FlatDirectory-style chunked
+   * storage and stream the file at the URL path chunk by chunk.
+   * Returns null when the contract/path is not servable this way.
+   */
+  async #fetchFlatDirectoryUrl(url, alreadyParsedUrl = null) {
+    const urlMainParts = urlMainPartsRegex.exec(url)
+    if(urlMainParts == null) {
+      return null;
+    }
+    const pathname = decodeURIComponent((urlMainParts.groups.path || '/').split('?')[0])
+    // Root path: leave it to the normal flow (serves the default file)
+    if(pathname.length <= 1) {
+      return null;
+    }
+
+    // Resolve the contract via the root path so that domain names, chain id
+    // and mode detection reuse the standard logic; when the caller already
+    // parsed the URL, its contractAddress/chainId are identical and reused.
+    let baseParsedUrl = alreadyParsedUrl;
+    if(baseParsedUrl == null) {
+      const rootUrl = urlMainParts.groups.protocol + '://' + urlMainParts.groups.hostname +
+        (urlMainParts.groups.chainId ? ':' + urlMainParts.groups.chainId : '') + '/'
+      baseParsedUrl = await this.parseUrl(rootUrl)
+    }
+    const chainClient = this.#chainClientProvider.getChainClient(baseParsedUrl.chainId)
+
+    const result = await fetchFlatDirectoryFile(chainClient, baseParsedUrl.contractAddress, pathname)
+    if(result == null) {
+      return null;
+    }
+
+    return {
+      url: url,
+      parsedUrl: baseParsedUrl,
+      httpCode: result.httpCode,
+      httpHeaders: result.httpHeaders,
+      output: result.output,
+      // Number of on-chain chunks the file is streamed from
+      flatDirectoryChunked: result.chunkCount,
+    }
   }
 
   /**
@@ -76,7 +176,6 @@ class Client {
 
       contractAddress: null,
       chainId: null,
-      chainRpc: null,
       
       // Web3 resolve mode: 'auto', 'manual' or 'resourceRequest'
       mode: null,
@@ -113,7 +212,7 @@ class Client {
       },
     }
 
-    let matchResult = url.match(/^(?<protocol>[^:]+):\/\/(?<hostname>[^:\/?]+)(:(?<chainId>[1-9][0-9]*))?(?<path>.*)?$/)
+    let matchResult = url.match(urlMainPartsRegex)
     if(matchResult == null) {
       throw new Error("Failed basic parsing of the URL");
     }
@@ -128,8 +227,14 @@ class Client {
     // Web3 network : if provided in the URL, use it, or mainnet by default
     result.chainId = 1
     // Was the network id specified?
-    if(urlMainParts.chainId !== undefined && isNaN(parseInt(urlMainParts.chainId)) == false) {
-      result.chainId = parseInt(urlMainParts.chainId);
+    if(urlMainParts.chainId !== undefined) {
+      const parsedChainId = Number(urlMainParts.chainId)
+      // Beyond 2^53 the chain id silently loses precision and would resolve
+      // to a wrong (or no) chain
+      if(!Number.isSafeInteger(parsedChainId)) {
+        throw new Error("Invalid chain id: " + urlMainParts.chainId);
+      }
+      result.chainId = parsedChainId;
     }
     // Prepare the chain client
     let chainClient = this.#chainClientProvider.getChainClient(result.chainId)
@@ -193,20 +298,41 @@ class Client {
       functionName: 'resolveMode',
       args: [],
     })
-    try {
-      let rawOutput = await chainClient.call({
-        to: result.contractAddress,
-        data: result.modeDeterminationCalldata,
-      })
-      if(rawOutput.data !== undefined) {
-        result.modeDeterminationReturn = rawOutput.data;
+    // The resolveMode of a contract is effectively static; cache successful
+    // determinations so that repeated parses of the same contract (e.g. each
+    // chunk of an ERC-5219 web3-next-chunk chain) do not re-issue the call.
+    // Failures are not cached: they may come from a transient RPC outage.
+    const resolveModeCacheKey = result.chainId + ':' + result.contractAddress.toLowerCase()
+    if(this.#resolveModeCache.has(resolveModeCacheKey)) {
+      result.modeDeterminationReturn = this.#resolveModeCache.get(resolveModeCacheKey)
+    }
+    else {
+      try {
+        let rawOutput = await chainClient.call({
+          to: result.contractAddress,
+          data: result.modeDeterminationCalldata,
+        })
+        if(rawOutput.data !== undefined) {
+          result.modeDeterminationReturn = rawOutput.data;
+        }
+      }
+      catch(err) {/** If call to resolveMode fails, we default to auto */}
+      if(result.modeDeterminationReturn !== null) {
+        // Bound the cache: evict the oldest entry beyond the cap (a long-lived
+        // client such as an extension service worker would otherwise grow it
+        // without limit)
+        if(this.#resolveModeCache.size >= 1000) {
+          this.#resolveModeCache.delete(this.#resolveModeCache.keys().next().value)
+        }
+        this.#resolveModeCache.set(resolveModeCacheKey, result.modeDeterminationReturn)
       }
     }
-    catch(err) {/** If call to resolveMode fails, we default to auto */}
 
     let resolveModeAsString = ''
     if(result.modeDeterminationReturn) {
-      resolveModeAsString = Buffer.from(result.modeDeterminationReturn.substr(2), "hex").toString().replace(/\0/g, '');
+      // The resolveMode return is a bytes32; only decode the first 32 bytes so
+      // that any garbage beyond it cannot pollute the mode string.
+      resolveModeAsString = hexToString('0x' + result.modeDeterminationReturn.substr(2, 64)).replace(/\0/g, '');
     }
     if(['', 'auto', 'manual', '5219'].indexOf(resolveModeAsString) === -1) {
       throw new Error("web3 resolveMode '" + resolveModeAsString + "' is not supported")
@@ -259,10 +385,11 @@ class Client {
     // Prepare the chain client
     let chainClient = this.#chainClientProvider.getChainClient(parsedUrl.chainId)
 
-    // Do the contract call
+    // Do the contract call ("data" is the canonical eth_call field; "input"
+    // is only a geth alias that stricter endpoints may ignore)
     let callOutput = await chainClient.call({
       to: parsedUrl.contractAddress,
-      input: parsedUrl.calldata
+      data: parsedUrl.calldata
     })
 
     return callOutput;
@@ -289,15 +416,7 @@ class Client {
       let decodedContractReturn = decodeAbiParameters([{ type: 'bytes' }], contractReturn.data)
       // Convert it into a Uint8Array byte buffer
       let outputBytes = hexToBytes(decodedContractReturn[0])
-      // Make it a readable stream
-      fetchedUrl.output = new ReadableStream({
-        type: "bytes",
-        start(controller) {
-          if(outputBytes.length > 0)
-            controller.enqueue(outputBytes);
-          controller.close();
-        }
-      });
+      fetchedUrl.output = bytesToReadableStream(outputBytes)
 
       if(parsedUrl.contractReturnProcessingOptions.mimeType) {
         fetchedUrl.httpHeaders['Content-Type'] = parsedUrl.contractReturnProcessingOptions.mimeType
@@ -308,15 +427,7 @@ class Client {
       let jsonData = JSON.stringify([contractReturn.data])
       // Convert it into a Uint8Array byte buffer
       let outputBytes = stringToBytes(jsonData)
-      // Make it a readable stream
-      fetchedUrl.output = new ReadableStream({
-        type: "bytes",
-        start(controller) {
-          if(outputBytes.length > 0)
-            controller.enqueue(outputBytes);
-          controller.close();
-        }
-      });
+      fetchedUrl.output = bytesToReadableStream(outputBytes)
 
       fetchedUrl.httpHeaders['Content-Type'] = 'application/json'
     }
@@ -329,15 +440,7 @@ class Client {
         (key, value) => typeof value === "bigint" ? "0x" + value.toString(16) : value)
       // Convert it into a Uint8Array byte buffer
       let outputBytes = stringToBytes(jsonEncodedValues)
-      // Make it a readable stream
-      fetchedUrl.output = new ReadableStream({
-        type: "bytes",
-        start(controller) {
-          if(outputBytes.length > 0)
-            controller.enqueue(outputBytes);
-          controller.close();
-        }
-      });
+      fetchedUrl.output = bytesToReadableStream(outputBytes)
 
       fetchedUrl.httpHeaders['Content-Type'] = 'application/json'
     }

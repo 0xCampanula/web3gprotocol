@@ -1,4 +1,5 @@
 import mime from 'mime';
+import { stringToHex } from 'viem';
 
 function parseManualUrl(result, path) {
   // Path must be at least "/"
@@ -22,7 +23,7 @@ function parseManualUrl(result, path) {
   }
 
   // We are sending the path as calldata
-  let callData = "0x" + Buffer.from(path).toString('hex')
+  let callData = stringToHex(path)
 
   result.contractCallMode = 'calldata'
   result.calldata = callData

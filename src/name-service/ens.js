@@ -1,5 +1,4 @@
 import { normalize as ensNormalize, namehash } from 'viem/ens'
-import { encodeFunctionData, decodeFunctionResult } from 'viem'
 
 const ensResolveDomainNameInclErc6821 = async (domainName, chainClient, chainList) => {
   let result = {
@@ -34,7 +33,7 @@ const ensResolveDomainNameInclErc6821 = async (domainName, chainClient, chainLis
   // Get ENS text
   result.erc6821ContentContractTxtCall = {
     contractAddress: result.fetchNameResolverCall.result.decodedResult,
-    chaidId: chainClient.chain().id,
+    chainId: chainClient.chain().id,
     result: null
   }
   const getTextAbi = [{
@@ -59,7 +58,7 @@ const ensResolveDomainNameInclErc6821 = async (domainName, chainClient, chainLis
     let contentContractTxtParts = result.erc6821ContentContractTxt.split(':');
     // Simple address?
     if(contentContractTxtParts.length == 1) {
-      if(/^0x[0-9a-fA-F]{40}/.test(result.erc6821ContentContractTxt) == false) {
+      if(/^0x[0-9a-fA-F]{40}$/.test(result.erc6821ContentContractTxt) == false) {
         throw new Error("Invalid address in contentcontract TXT record")
       }
       result.resultAddress = result.erc6821ContentContractTxt;
@@ -71,7 +70,7 @@ const ensResolveDomainNameInclErc6821 = async (domainName, chainClient, chainLis
       if(chainByShortName == null) {
         throw new Error("The chain short name of the contentcontract TXT record was not found")
       }
-      if(/^0x[0-9a-fA-F]{40}/.test(contentContractTxtParts[1]) == false) {
+      if(/^0x[0-9a-fA-F]{40}$/.test(contentContractTxtParts[1]) == false) {
         throw new Error("Invalid address in contentcontract TXT record")
       }
       result.resultChainId = chainByShortName.id
@@ -121,9 +120,14 @@ const ensResolveDomainName = async (domainName, chainClient) => {
 }
 
 const ensGetDomainNameResolver = async(domainNameHash, chainClient) => {
+  // A custom chain list may lack the ENS registry entry for this chain
+  if(chainClient.chain().contracts?.ensRegistry?.address == null) {
+    throw new Error("No ENS registry is configured for chain " + chainClient.chain().id)
+  }
+
   let result = {
     contractAddress: chainClient.chain().contracts.ensRegistry.address,
-    chaidId: chainClient.chain().id,
+    chainId: chainClient.chain().id,
     result: null
   }
 
@@ -142,13 +146,19 @@ const ensGetDomainNameResolver = async(domainNameHash, chainClient) => {
     args: [domainNameHash]
   })
 
+  // An unregistered name has resolver 0x0; calling text()/addr() on it would
+  // hit an EOA and fail later with a cryptic ABI decode error
+  if(result.result.decodedResult == null || result.result.decodedResult == "0x0000000000000000000000000000000000000000") {
+    throw new Error("Domain name has no resolver (not registered?)")
+  }
+
   return result;
 }
 
 const ensResolveDomainNameWithResolver = async (domainNameHash, chainClient, resolverAddress) => {
   let result = {
       contractAddress: resolverAddress,
-      chaidId: chainClient.chain().id,
+      chainId: chainClient.chain().id,
       result: null
     }
 

@@ -1,5 +1,5 @@
 import { normalize as ensNormalize } from 'viem/ens'
-import { stringToHex } from 'viem'
+import { stringToHex, stringToBytes } from 'viem'
 
 const linagee = {
   address :"0x6023E55814DC00F094386d4eb7e17Ce49ab1A190",
@@ -19,15 +19,14 @@ const linagee = {
   }],
   domainAsBytes32(domainName){
     // og domains are stored in a bytes32
-    if(domainName.length > 35)
-      throw new Error("Domain too long (32 bytes max for .og");
     //og names must be converted from a string into a bytes hex string without og on the end
-    let domainBytes32 = stringToHex(domainName.slice(0,-3), {size: 32});
-    // pad the string properly
-    while (domainBytes32.length < 66) {
-      domainBytes32 += '0';
-    }
-    return domainBytes32;
+    const nameWithoutTld = domainName.slice(0,-3);
+    // Length must be checked in bytes: non-ASCII names take more than one
+    // byte per UTF-16 code unit
+    if(stringToBytes(nameWithoutTld).length > 32)
+      throw new Error("Domain too long (32 bytes max for .og)");
+    // stringToHex with size 32 already right-pads with zeros
+    return stringToHex(nameWithoutTld, {size: 32});
   }
 }
 
@@ -111,7 +110,7 @@ const linageeResolveDomainNameInclErc6821 = async (domainName, chainClient, chai
     let contentContractTxtParts = result.erc6821ContentContractTxt.split(':');
     // Simple address?
     if(contentContractTxtParts.length == 1) {
-      if(/^0x[0-9a-fA-F]{40}/.test(result.erc6821ContentContractTxt) == false) {
+      if(/^0x[0-9a-fA-F]{40}$/.test(result.erc6821ContentContractTxt) == false) {
         throw new Error("Invalid address in contentcontract TXT record")
       }
       result.resultAddress = result.erc6821ContentContractTxt;
@@ -123,10 +122,10 @@ const linageeResolveDomainNameInclErc6821 = async (domainName, chainClient, chai
       if(chainByShortName == null) {
         throw new Error("The chain short name of the contentcontract TXT record was not found")
       }
-      if(/^0x[0-9a-fA-F]{40}/.test(contentContractTxtParts[1]) == false) {
+      if(/^0x[0-9a-fA-F]{40}$/.test(contentContractTxtParts[1]) == false) {
         throw new Error("Invalid address in contentcontract TXT record")
       }
-      result.resolverChainId = chainByShortName.id
+      result.resultChainId = chainByShortName.id
       result.resultAddress = contentContractTxtParts[1]
     }
     // Mistake
