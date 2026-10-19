@@ -59,9 +59,9 @@ function processResourceRequestContractReturn(client, fetchedUrl, contractReturn
   // Convert it into a Uint8Array byte buffer
   let outputBytes = hexToBytes(decodedContractReturn[1])
   
-  // Prepare the readable stream
+  // Prepare the readable stream (plain stream; see index.js for why no
+  // type:"bytes" is used)
   fetchedUrl.output = new ReadableStream({
-    type: "bytes",
     async start(controller) {
       try {
         if(outputBytes.length > 0)

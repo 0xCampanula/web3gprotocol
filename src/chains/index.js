@@ -60,11 +60,13 @@ function buildChainList() {
       /^http[s]?:\/\//.test(rpc)
     )
 
-    // If the chain is available in the viem.sh inventory, we use it as it contains better default
-    // RPC URLs
+    // If the chain is available in the viem.sh inventory, merge its endpoints
+    // ahead of the chainid.network ones (viem endpoints are generally
+    // reliable), keeping the chainid.network endpoints as extra candidates so
+    // there is something to fall back to / pick from.
     const viemChain = viemChainsById.get(originalChain.chainId) || null
     if(viemChain) {
-      defaultRpcs = [...viemChain.rpcUrls.default.http]
+      defaultRpcs = [...new Set([...viemChain.rpcUrls.default.http, ...defaultRpcs])]
       if(viemChain?.contracts?.ensRegistry) {
         contracts.ensRegistry = {
           address: viemChain.contracts.ensRegistry.address
@@ -74,9 +76,11 @@ function buildChainList() {
 
     // Final manual overrides :
     // Ethereum: Cloudflare seems to be flaky lately, use several well-known
-    // free endpoints so a single node failure does not break mainnet access
+    // free endpoints so a single node failure does not break mainnet access.
+    // (rpc.flashbots.net is deliberately excluded: it 403s every method
+    // outside its transaction-relay whitelist, including eth_call.)
     if(originalChain.chainId == 1) {
-      defaultRpcs = ["https://ethereum.publicnode.com", "https://eth.drpc.org", "https://rpc.flashbots.net"]
+      defaultRpcs = ["https://ethereum.publicnode.com", "https://eth.drpc.org"]
     }
     // Sepolia: the chainid.network/viem default (rpc.sepolia.org) is flaky --
     // HTTP 522s, and it rejects requests without a browser User-Agent -- use
@@ -85,10 +89,11 @@ function buildChainList() {
       defaultRpcs = ["https://ethereum-sepolia.publicnode.com", "https://11155111.rpc.thirdweb.com", "https://sepolia.drpc.org"]
     }
 
-    // Prepend the gethfs-cli curated endpoint (if any) so it is tried first
+    // Promote the gethfs-cli endpoint (if any) to the front so it is tried
+    // first
     const gethfsRpc = gethfsCuratedRpcs.get(originalChain.chainId)
-    if(gethfsRpc !== undefined && defaultRpcs.includes(gethfsRpc) == false) {
-      defaultRpcs.unshift(gethfsRpc)
+    if(gethfsRpc !== undefined) {
+      defaultRpcs = [gethfsRpc, ...defaultRpcs.filter(rpc => rpc !== gethfsRpc)]
     }
 
     let newChain = {

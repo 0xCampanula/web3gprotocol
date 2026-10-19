@@ -12,9 +12,10 @@ import { fetchFlatDirectoryFile } from './flatdirectory.js'
 // `new URL()`: chain ids exceed the 65535 port limit
 const urlMainPartsRegex = /^(?<protocol>[^:]+):\/\/(?<hostname>[^:\/?]+)(:(?<chainId>[1-9][0-9]*))?(?<path>.*)?$/
 
-// Make a one-shot byte ReadableStream from a Uint8Array
+// Make a one-shot byte ReadableStream from a Uint8Array. Plain stream (no
+// type:"bytes"): nothing uses BYOB readers, and Chrome service workers fail
+// to deliver respondWith() byte-stream bodies.
 const bytesToReadableStream = (outputBytes) => new ReadableStream({
-  type: "bytes",
   start(controller) {
     if(outputBytes.length > 0)
       controller.enqueue(outputBytes);
@@ -54,8 +55,20 @@ class Client {
 
   /**
    * Fetch a web3:// URL
+   * @param {object} [options]
+   * @param {boolean} [options.bypassChunkCache] true to skip reading the
+   *   persistent chunk cache (hard refresh); fetched chunks are still
+   *   written to it.
+   * @param {number} [options.byteStart] media element Range start: 0 serves
+   *   the whole file as 206; a positive offset is served from that byte
+   *   when its chunk is already downloaded or cached (206), else the
+   *   response is the plain full stream. Downloads always stay sequential.
    */
-  async fetchUrl(url) {
+  async fetchUrl(url, options = {}) {
+    // Media element Range start; anything not a non-negative integer means
+    // "no range requested"
+    const byteStart = (options.byteStart != null && Number.isInteger(options.byteStart) && options.byteStart >= 0)
+      ? options.byteStart : null
 
     let parsedUrl;
     try {
@@ -64,11 +77,26 @@ class Client {
     catch(err) {
       // Standard parsing fails for paths that are not valid auto-mode method
       // names (e.g. "/firefly.mp4"); probe for a FlatDirectory-style chunked
-      // storage contract before giving up.
-      const flatDirectoryResult = await this.#fetchFlatDirectoryUrl(url)
-        .catch((err) => this.#handleFlatDirectoryProbeError(err, url))
+      // storage contract before giving up. The probe outcome matters:
+      // - null = it ran against the chain and conclusively found nothing
+      // - undefined = it was skipped (root path, unparseable URL)
+      // - rejection = endpoint-level failure (network, rate limit...)
+      let probeConclusive = false
+      const flatDirectoryResult = await this.#fetchFlatDirectoryUrl(url, null, options.bypassChunkCache === true, byteStart)
+        .then((result) => { probeConclusive = (result === null); return result })
+        .catch((probeErr) => this.#handleFlatDirectoryProbeError(probeErr, url))
       if(flatDirectoryResult) {
         return flatDirectoryResult;
+      }
+      // A conclusive "no chunked-storage file" outcome is identical on every
+      // RPC endpoint: mark the error so callers do not retry other endpoints
+      // (that would only burn their rate limits), and hint at the chain that
+      // was actually queried.
+      if(probeConclusive) {
+        err.nonRetriable = true
+        const queriedChainId = urlMainPartsRegex.exec(url)?.groups?.chainId ?? "1"
+        err.message = err.message + " (no such file on chain " + queriedChainId +
+          " for this contract; if the file lives on another chain, add \":<chainId>\" to the web3 URL)"
       }
       throw err;
     }
@@ -77,7 +105,7 @@ class Client {
     // single merged call, which is physically impossible for large files;
     // prefer a chunked read when the contract is a FlatDirectory-style storage.
     if(parsedUrl.mode == "manual") {
-      const flatDirectoryResult = await this.#fetchFlatDirectoryUrl(url, parsedUrl)
+      const flatDirectoryResult = await this.#fetchFlatDirectoryUrl(url, parsedUrl, options.bypassChunkCache === true, byteStart)
         .catch((err) => this.#handleFlatDirectoryProbeError(err, url))
       if(flatDirectoryResult) {
         return flatDirectoryResult;
@@ -105,15 +133,17 @@ class Client {
    * storage and stream the file at the URL path chunk by chunk.
    * Returns null when the contract/path is not servable this way.
    */
-  async #fetchFlatDirectoryUrl(url, alreadyParsedUrl = null) {
+  async #fetchFlatDirectoryUrl(url, alreadyParsedUrl = null, bypassChunkCache = false, byteStart = null) {
     const urlMainParts = urlMainPartsRegex.exec(url)
     if(urlMainParts == null) {
-      return null;
+      // undefined = "probe skipped" (as opposed to null = "probe ran and
+      // conclusively found nothing servable")
+      return undefined;
     }
     const pathname = decodeURIComponent((urlMainParts.groups.path || '/').split('?')[0])
     // Root path: leave it to the normal flow (serves the default file)
     if(pathname.length <= 1) {
-      return null;
+      return undefined;
     }
 
     // Resolve the contract via the root path so that domain names, chain id
@@ -127,7 +157,7 @@ class Client {
     }
     const chainClient = this.#chainClientProvider.getChainClient(baseParsedUrl.chainId)
 
-    const result = await fetchFlatDirectoryFile(chainClient, baseParsedUrl.contractAddress, pathname)
+    const result = await fetchFlatDirectoryFile(chainClient, baseParsedUrl.contractAddress, pathname, bypassChunkCache, byteStart)
     if(result == null) {
       return null;
     }

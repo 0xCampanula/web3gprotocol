@@ -64,7 +64,12 @@ async function parseAutoUrl(result, path, chainClient) {
     }
 
     // Decode the return value recursively (tuples)
-    let recReturnDecodeFn = function(recReturnDecodeFn, textToDecode) {
+    let recReturnDecodeFn = function(recReturnDecodeFn, textToDecode, depth = 0) {
+      // Guard against pathological nesting (e.g. returns=((((...))))): a URL
+      // with thousands of parentheses would otherwise overflow the stack
+      if(depth > 32) {
+        throw new Error("returns argument is nested too deeply")
+      }
       let result = []
   
       // Separate parts
@@ -92,7 +97,7 @@ async function parseAutoUrl(result, path, chainClient) {
         // Look for tuple
         let tupleMatch = parts[i].match(/^\((?<tupleComponents>.+)\)(?<arrayDef>[\[\]0-9]*)$/)
         if(tupleMatch) {
-          let tupleComponents = recReturnDecodeFn(recReturnDecodeFn, tupleMatch.groups.tupleComponents)
+          let tupleComponents = recReturnDecodeFn(recReturnDecodeFn, tupleMatch.groups.tupleComponents, depth + 1)
           result.push({type: "tuple" + tupleMatch.groups.arrayDef, components: tupleComponents})
         }
         // Basic type

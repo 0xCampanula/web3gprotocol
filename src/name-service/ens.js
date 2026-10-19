@@ -43,13 +43,19 @@ const ensResolveDomainNameInclErc6821 = async (domainName, chainClient, chainLis
     outputs: [{type: 'string'}],
     stateMutability: 'view',
   }];
-  result.erc6821ContentContractTxtCall.result = await chainClient.callContract({
-    abi: getTextAbi,
-    contractAddress: result.erc6821ContentContractTxtCall.contractAddress,
-    functionName: 'text',
-    args: [nameHash, "contentcontract"]
-  })
-  result.erc6821ContentContractTxt = result.erc6821ContentContractTxtCall.result.decodedResult
+  // Old resolvers may not implement text(): treat a failing call as "no
+  // contentcontract TXT record" and fall through to direct addr() resolution
+  // instead of failing the whole lookup
+  try {
+    result.erc6821ContentContractTxtCall.result = await chainClient.callContract({
+      abi: getTextAbi,
+      contractAddress: result.erc6821ContentContractTxtCall.contractAddress,
+      functionName: 'text',
+      args: [nameHash, "contentcontract"]
+    })
+    result.erc6821ContentContractTxt = result.erc6821ContentContractTxtCall.result.decodedResult
+  }
+  catch(err) {/** no text() support: resolutionType stays direct */}
 
   // contentcontract TXT case
   if(result.erc6821ContentContractTxt) {

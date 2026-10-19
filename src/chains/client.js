@@ -153,27 +153,95 @@ class ChainClient {
     return {data: output, rpcUrls, rpcUrlUsedIndex, rpcUrlsErrors}
   }
 
-  async #rpcCall(rpcUrl, args) {
-    if(this.#rpcCallCounters[rpcUrl] === undefined) {
-      this.#rpcCallCounters[rpcUrl] = 0;
-    }
-    this.#rpcCallCounters[rpcUrl]++;
+  /**
+   * Call several contract methods in one JSON-RPC batch request (one HTTP
+   * round trip for N eth_calls). Unlike a multicall contract, each sub-call
+   * keeps its own gas accounting, so batching works for large return data.
+   * Returns an array aligned with batchArgs of {decodedResult} or {error}.
+   * Throws only on transport-level failure (all RPCs down, malformed batch
+   * response); callers are expected to fall back to individual calls then.
+   */
+  async callContractBatch(batchArgs) {
+    const calls = batchArgs.map(args => ({
+      to: args.contractAddress,
+      data: encodeFunctionData({abi: args.abi, functionName: args.functionName, args: args.args}),
+    }))
+    const rawResults = await this.callBatch(calls)
+    return rawResults.map((raw, i) => {
+      if(raw.error != null) {
+        return {error: raw.error}
+      }
+      try {
+        return {decodedResult: decodeFunctionResult({abi: batchArgs[i].abi, functionName: batchArgs[i].functionName, data: raw.result})}
+      }
+      catch(err) {
+        return {error: err}
+      }
+    })
+  }
 
-    let postData = {
-      jsonrpc: "2.0", 
-      id: this.#rpcCallCounters[rpcUrl],
-      method: "eth_call",
-      params:[
-        args,
-        "latest"
-      ]
+  /**
+   * Batched eth_call with fallback over the configured RPC URLs.
+   * Returns an array aligned with `calls` of {result} or {error: Error}.
+   * Throws RPCsError when every endpoint fails at transport level.
+   */
+  async callBatch(calls) {
+    // Copy RPC URLs, so an external mutation of chain.rpcUrls cannot
+    // affect the iteration in progress
+    const rpcUrls = [...this.#chain.rpcUrls]
+    const rpcUrlsErrors = []
+    for(let rpcUrlUsedIndex = 0; rpcUrlUsedIndex < rpcUrls.length; rpcUrlUsedIndex++) {
+      try {
+        return await this.#rpcBatchCall(rpcUrls[rpcUrlUsedIndex], calls)
+      }
+      catch(err) {
+        rpcUrlsErrors.push(err.toString())
+      }
     }
+    throw new RPCsError("All RPC providers failed the request. First RPC provider error: " + rpcUrlsErrors[0], rpcUrls, rpcUrlsErrors)
+  }
 
+  async #rpcBatchCall(rpcUrl, calls) {
+    const postData = calls.map(callArgs => {
+      if(this.#rpcCallCounters[rpcUrl] === undefined) {
+        this.#rpcCallCounters[rpcUrl] = 0;
+      }
+      this.#rpcCallCounters[rpcUrl]++;
+      return {
+        jsonrpc: "2.0",
+        id: this.#rpcCallCounters[rpcUrl],
+        method: "eth_call",
+        params: [callArgs, "latest"]
+      };
+    })
+
+    const json = await this.#rpcPost(rpcUrl, postData)
+    if(!Array.isArray(json) || json.length != postData.length) {
+      throw new Error("RPC returned a malformed batch response");
+    }
+    // Sub-responses may arrive out of order; realign by request id.
+    const byId = new Map(json.map(r => [r.id, r]));
+    return postData.map(req => {
+      const r = byId.get(req.id);
+      if(r == null) {
+        throw new Error("RPC batch response is missing a sub-response");
+      }
+      if(r.error) {
+        return {error: new Error("RPC error" + (r.error.code !== undefined ? " " + r.error.code : "") + ": " + (r.error.message || JSON.stringify(r.error)))};
+      }
+      if(r.result === undefined) {
+        return {error: new Error("No data returned")};
+      }
+      return {result: r.result};
+    })
+  }
+
+  async #rpcPost(rpcUrl, postData) {
     // A hung RPC endpoint must not stall the whole request: abort after a
     // timeout so fallback/parallel modes can proceed with other endpoints.
     const RPC_CALL_TIMEOUT_MS = 30000;
     // A compromised or buggy endpoint must not exhaust memory with a huge
-    // response body; eth_call results are small, so cap the accepted size.
+    // response body; cap the accepted size (batched calls stay well below).
     const MAX_RPC_RESPONSE_BYTES = 10 * 1024 * 1024;
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => abortController.abort(), RPC_CALL_TIMEOUT_MS);
@@ -181,9 +249,12 @@ class ChainClient {
     let response;
     try {
       response = await fetch(rpcUrl, {
-        method: 'POST', 
+        method: 'POST',
+        // text/plain keeps the request a CORS "simple request": no OPTIONS
+        // preflight round trip before every call. JSON-RPC servers parse the
+        // body and do not care about this header.
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'text/plain'
         },
         body: JSON.stringify(postData),
         signal: abortController.signal
@@ -238,7 +309,26 @@ class ChainClient {
       }
     }
 
-    const json = JSON.parse(bodyText)
+    return JSON.parse(bodyText);
+  }
+
+  async #rpcCall(rpcUrl, args) {
+    if(this.#rpcCallCounters[rpcUrl] === undefined) {
+      this.#rpcCallCounters[rpcUrl] = 0;
+    }
+    this.#rpcCallCounters[rpcUrl]++;
+
+    const postData = {
+      jsonrpc: "2.0",
+      id: this.#rpcCallCounters[rpcUrl],
+      method: "eth_call",
+      params:[
+        args,
+        "latest"
+      ]
+    }
+
+    const json = await this.#rpcPost(rpcUrl, postData)
 
     // A contract revert (or any JSON-RPC error) carries its reason in
     // json.error; surface it instead of masking it as a missing result.
